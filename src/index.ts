@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, session } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { GoogleGenAI } from "@google/genai";
 import { createServer } from "node:http";
 
@@ -18,7 +18,7 @@ if (!GEMINI_API_KEY) {
 const bot = new Bot(BOT_TOKEN);
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 bot.command("start", async (ctx) => {
   await ctx.reply(
@@ -69,7 +69,7 @@ createServer((req, res) => {
   res.end("ok");
 }).listen(process.env.PORT || 3000);
 
-// Inicia o bot (primeiro inicializa, depois mostra o nome)
+// Inicia o bot
 bot.start().then(() => {
   console.log("🤖 Aprendiz rodando como @" + bot.botInfo.username);
 });
