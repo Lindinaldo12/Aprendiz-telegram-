@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, session } from "grammy";
 import { GoogleGenAI } from "@google/genai";
 import { createServer } from "node:http";
 
@@ -48,7 +48,7 @@ bot.callbackQuery("sobre", async (ctx) => {
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
 
-  if (text.startswith("/")) return;
+  if (text.startsWith("/")) return;
 
   try {
     const res = await ai.models.generateContent({
@@ -69,7 +69,7 @@ createServer((req, res) => {
   res.end("ok");
 }).listen(process.env.PORT || 3000);
 
-console.log("🤖 Aprendiz rodando como @" + bot.botInfo.username);
-
-// Inicia o bot
-bot.start();
+// Inicia o bot (primeiro inicializa, depois mostra o nome)
+bot.start().then(() => {
+  console.log("🤖 Aprendiz rodando como @" + bot.botInfo.username);
+});
