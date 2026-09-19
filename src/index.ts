@@ -1,50 +1,75 @@
-import "dotenv/config";
-import { Bot } from "grammy";
-import {
-  cmdStart,
-  cmdHelp,
-  cmdMemoria,
-  cmdConfig,
-  cmdLimpar,
-  cmdSobre,
-  cmdCalcular,
-  cmdPiada,
-  cmdHora,
-  cmdId,
-  cmdTraduzir,
-  cmdResumir,
-  cmdPesquisar,
-} from "./bot/commands.js";
-import { handleMensagem, handleArquivo } from "./bot/handlers.js";
+import { Bot, InlineKeyboard } from "grammy";
+import { GoogleGenAI } from "@google/genai";
+import { createServer } from "node:http";
 
-const token = process.env.BOT_TOKEN;
-if (!token) {
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+if (!BOT_TOKEN) {
   console.error("❌ BOT_TOKEN não definido no .env");
   process.exit(1);
 }
 
-const bot = new Bot(token);
+if (!GEMINI_API_KEY) {
+  console.error("❌ GEMINI_API_KEY não definido no .env");
+  process.exit(1);
+}
 
-bot.command("start", cmdStart);
-bot.command("help", cmdHelp);
-bot.command("memoria", cmdMemoria);
-bot.command("config", cmdConfig);
-bot.command("limpar", cmdLimpar);
-bot.command("sobre", cmdSobre);
-bot.command("calcular", cmdCalcular);
-bot.command("piada", cmdPiada);
-bot.command("hora", cmdHora);
-bot.command("id", cmdId);
-bot.command("traduzir", cmdTraduzir);
-bot.command("resumir", cmdResumir);
-bot.command("pesquisar", cmdPesquisar);
+const bot = new Bot(BOT_TOKEN);
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-bot.on("message:text", handleMensagem);
-bot.on("message:document", handleArquivo);
-bot.on("message:photo", handleArquivo);
-bot.on("message:voice", handleArquivo);
-bot.on("message:audio", handleArquivo);
+const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-bot.start({
-  onStart: (info) => console.log(`🤖 Aprendiz rodando como @${info.username}`),
+bot.command("start", async (ctx) => {
+  await ctx.reply(
+    "🤖 Olá! Eu sou o Aprendiz Bot.\n\n" +
+    "Me mande qualquer mensagem que eu respondo!",
+    {
+      reply_markup: new InlineKeyboard()
+        .text("🧹 Limpar", "limpar")
+        .text("ℹ️ Sobre", "sobre"),
+    }
+  );
 });
+
+bot.callbackQuery("limpar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply("Conversa limpa! Me mande uma nova mensagem. 😊");
+});
+
+bot.callbackQuery("sobre", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply(
+    "ℹ️ Eu sou o Aprendiz Bot, feito com Telegram + IA Gemini.\n" +
+    "Rodando 24h por dia no Render! 🚀"
+  );
+});
+
+bot.on("message:text", async (ctx) => {
+  const text = ctx.message.text;
+
+  if (text.startswith("/")) return;
+
+  try {
+    const res = await ai.models.generateContent({
+      model: MODEL,
+      contents: text,
+    });
+    const reply = res.text || "Desculpe, não consegui responder agora.";
+    await ctx.reply(reply);
+  } catch (err) {
+    console.error("❌ Erro no Gemini:", err);
+    await ctx.reply("⚠️ Ops, tentei responder mas deu erro. Tente de novo!");
+  }
+});
+
+// Mantém o Render ativo (porta obrigatória)
+createServer((req, res) => {
+  res.writeHead(200);
+  res.end("ok");
+}).listen(process.env.PORT || 3000);
+
+console.log("🤖 Aprendiz rodando como @" + bot.botInfo.username);
+
+// Inicia o bot
+bot.start();
