@@ -19,18 +19,9 @@ export async function askGemini(prompt: string): Promise<string> {
     });
     return response.text || 'Senhor, não obtive resposta da rede.';
   } catch (error: any) {
-    console.error('Erro no Gemini:', error);
-
-    // Tratamento para limite de requisições (429)
     if (error?.status === 429) {
-      return 'Senhor, atingimos o limite temporário de requisições do Gemini. Por favor, aguarde cerca de 30 segundos e tente novamente.';
+      return 'Senhor, atingimos o limite de requisições por minuto. Por favor, aguarde alguns segundos e tente novamente.';
     }
-
-    // Tratamento para instabilidade nos servidores (503)
-    if (error?.status === 503) {
-      return 'Senhor, os servidores centrais do Gemini estão enfrentando alta demanda. Por favor, tente novamente em instantes.';
-    }
-
-    return 'Desculpe, Senhor. Ocorreu uma falha no meu sistema central.';
+    return 'Desculpe, Senhor. Ocorreu uma falha no processamento central.';
   }
 }
