@@ -1,130 +1,111 @@
-import { Bot, InlineKeyboard } from "grammy";
+ import { Bot, webhookCallback, GrammyError, HttpError } from "grammy";
+import express from "express";
 import { GoogleGenAI } from "@google/genai";
-import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { JARVIS_BRAIN } from "./brain";
 
+// 1. Validação de Variáveis de Ambiente
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const ADMIN_ID = process.env.ADMIN_ID || "8133082447"; // seu ID
+const SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const PORT = Number(process.env.PORT) || 10000;
 
-if (!BOT_TOKEN) { console.error("❌ BOT_TOKEN não definido"); process.exit(1); }
-if (!GEMINI_API_KEY) { console.error("❌ GEMINI_API_KEY não definido"); process.exit(1); }
+if (!BOT_TOKEN) throw new Error("⚠️ BOT_TOKEN não foi configurado!");
+if (!GEMINI_API_KEY) throw new Error("⚠️ GEMINI_API_KEY não foi configurada!");
 
+// 2. Inicialização dos Clientes
 const bot = new Bot(BOT_TOKEN);
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
-// ===== MEMÓRIA PERMANENTE (arquivo JSON) =====
-const MEMORY_FILE = "./memoria.json";
+// 3. Função com Retentativa Automática para Erros 429 (Cota) e 503 (Indisponível)
+async function askGeminiWithBrain(userPrompt: string, retries = 3, delayMs = 3000): Promise<string> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash", // Modelo recomendado para a cota gratuita
+        contents: userPrompt,
+        config: {
+          systemInstruction: JARVIS_BRAIN,
+        },
+      });
 
-function carregarMemoria() {
-  if (existsSync(MEMORY_FILE)) {
-    try { return JSON.parse(readFileSync(MEMORY_FILE, "utf-8")); }
-    catch { return { memoria: "", historico: [] }; }
+      return response.text || "Irmão, não consegui gerar uma resposta no momento.";
+    } catch (error: any) {
+      const status = error?.status || error?.code;
+      const isRateLimit = status === 429 || error?.message?.includes("RESOURCE_EXHAUSTED");
+      const isUnavailable = status === 503 || error?.message?.includes("UNAVAILABLE");
+
+      if ((isRateLimit || isUnavailable) && attempt < retries) {
+        // Se a API enviou o tempo de espera ideal no erro, usamos ele; senão usaremos o tempo padrão
+        const waitTime = isRateLimit ? 35000 : delayMs * attempt;
+        console.warn(`⚠️ [Gemini ${status}] Cota/Demanda atingida. Tentativa ${attempt} de ${retries}. Aguardando ${waitTime / 1000}s...`);
+        
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+      } else {
+        throw error;
+      }
+    }
   }
-  return { memoria: "", historico: [] };
+  throw new Error("Não foi possível conectar com o Gemini após várias tentativas.");
 }
 
-function salvarMemoria(dados) {
-  writeFileSync(MEMORY_FILE, JSON.stringify(dados, null, 2));
-}
-
-let dados = carregarMemoria();
-
-// ===== COMANDOS DE ADMIN =====
-function isAdmin(id) { return String(id) === String(ADMIN_ID); }
-
-bot.command("memoria", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Acesso restrito ao administrador.");
-  const texto = ctx.match?.trim();
-  if (!texto) {
-    return ctx.reply(
-      "🧠 Minha memória atual:\n\n" +
-      (dados.memoria || "(vazia)") +
-      "\n\nUse: /memoria <texto> para definir."
-    );
-  }
-  dados.memoria = texto;
-  salvarMemoria(dados);
-  await ctx.reply("✅ Memória atualizada! Agora eu lembro disso sempre.");
+// 4. Handler de Mensagens do Telegram
+bot.command("start", (ctx) => {
+  return ctx.reply("Olá, meu irmão! JARVIS online e pronto. Como posso te ajudar hoje?");
 });
 
-bot.command("limpar_memoria", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Acesso restrito ao administrador.");
-  dados = { memoria: "", historico: [] };
-  salvarMemoria(dados);
-  await ctx.reply("🧹 Memória totalmente limpa.");
-});
-
-bot.command("historico", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Acesso restrito ao administrador.");
-  const ultimas = dados.historico.slice(-10).map(h => `${h.role}: ${h.text}`).join("\n");
-  await ctx.reply("📜 Últimas conversas:\n\n" + (ultimas || "(sem histórico)"));
-});
-
-// ===== COMEÇO =====
-bot.command("start", async (ctx) => {
-  await ctx.reply(
-    "🤖 Olá! Eu sou o Aprendiz Bot.\n\n" +
-    "Me mande qualquer mensagem que eu respondo!\n\n" +
-    "Comandos:\n/memoria <texto> - define minha memória\n/memoria - ver memória\n/limpar_memoria - limpa tudo\n/historico - ver conversas",
-    { reply_markup: new InlineKeyboard().text("🧹 Limpar", "limpar").text("ℹ️ Sobre", "sobre") }
-  );
-});
-
-bot.callbackQuery("limpar", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  dados.historico = [];
-  salvarMemoria(dados);
-  await ctx.reply("Conversa limpa! Me mande uma nova mensagem. 😊");
-});
-
-bot.callbackQuery("sobre", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.reply("ℹ️ Eu sou o Aprendiz Bot, feito com Telegram + IA Gemini. Rodando 24h no Render! 🚀");
-});
-
-// ===== RESPOSTA COM MEMÓRIA =====
 bot.on("message:text", async (ctx) => {
-  const text = ctx.message.text;
-  if (text.startsWith("/")) return;
-
-  // Guarda no histórico
-  dados.historico.push({ role: "user", text });
-  if (dados.historico.length > 20) dados.historico = dados.historico.slice(-20);
-
   try {
-    const contexto = dados.memoria
-      ? `Você é o Aprendiz Bot, 100% obediente ao seu criador. Lembre-se sempre disto:\n${dados.memoria}\n\n`
-      : "";
-
-    const historico = dados.historico
-      .map(h => `${h.role === "user" ? "Usuário" : "Bot"}: ${h.text}`)
-      .join("\n");
-
-    const res = await ai.models.generateContent({
-      model: MODEL,
-      contents: contexto + historico + "\nBot:",
-    });
-
-    const reply = res.text || "Desculpe, não consegui responder agora.";
-    dados.historico.push({ role: "bot", text: reply });
-    if (dados.historico.length > 20) dados.historico = dados.historico.slice(-20);
-    salvarMemoria(dados);
-
-    await ctx.reply(reply);
-  } catch (err) {
-    console.error("❌ Erro no Gemini:", err);
-    await ctx.reply("⚠️ Ops, tentei responder mas deu erro. Tente de novo!");
+    await ctx.replyWithChatAction("typing");
+    const answer = await askGeminiWithBrain(ctx.message.text);
+    await ctx.reply(answer);
+  } catch (error: any) {
+    console.error("❌ Erro ao processar mensagem:", error?.message || error);
+    
+    if (error?.status === 429 || error?.message?.includes("RESOURCE_EXHAUSTED")) {
+      await ctx.reply("⚠️ Irmão, atingimos o limite temporário de requisições da IA. Por favor, aguarde cerca de 30 segundos e envie novamente.");
+    } else {
+      await ctx.reply("⚠️ Ocorreu um erro interno ao processar sua solicitação. Tente novamente em instantes.");
+    }
   }
 });
 
-// ===== PORTA PARA O RENDER =====
-createServer((req, res) => {
-  res.writeHead(200);
-  res.end("ok");
-}).listen(process.env.PORT || 3000);
+// 5. Captura Global de Erros no grammY
+bot.catch((err) => {
+  const ctx = err.ctx;
+  console.error(`❌ Erro no Update ID ${ctx.update.update_id}:`);
+  const e = err.error;
 
-bot.start().then(() => {
-  console.log("🤖 Aprendiz rodando como @" + bot.botInfo.username);
+  if (e instanceof GrammyError) {
+    console.error("Erro na API do Telegram:", e.description);
+  } else if (e instanceof HttpError) {
+    console.error("Erro de conexão de rede:", e);
+  } else {
+    console.error("Erro interno:", e);
+  }
+});
+
+// 6. Servidor Express para Webhook no Render
+const app = express();
+app.use(express.json());
+
+app.use(
+  "/webhook",
+  webhookCallback(bot, "express", {
+    secretToken: SECRET_TOKEN,
+  })
+);
+
+app.get("/", (_req, res) => {
+  res.status(200).send("JARVIS / Aprendiz System Online.");
+});
+
+app.listen(PORT, async () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+
+  if (WEBHOOK_URL) {
+    const fullUrl = `${WEBHOOK_URL}/webhook`;
+    await bot.api.setWebhook(fullUrl, { secret_token: SECRET_TOKEN });
+    console.log(`🔗 Webhook registrado: ${fullUrl}`);
+  }
 });
