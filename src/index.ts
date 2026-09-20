@@ -1,18 +1,24 @@
- import express from 'express';
+import express from 'express';
 import { Bot } from 'grammy';
-import { askGemini } from './brain';
+import { askGemini, clearMemory } from './brain';
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Token do Telegram vindo das variáveis do Render
 const botToken = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
 const bot = new Bot(botToken);
+
+// Comando para o usuário resetar a memória da conversa
+bot.command('reset', async (ctx) => {
+  clearMemory(ctx.chat.id);
+  await ctx.reply('Memória da conversa reiniciada com sucesso, Senhor.');
+});
 
 // Resposta a mensagens de texto no Telegram
 bot.on('message:text', async (ctx) => {
   try {
-    const resposta = await askGemini(ctx.message.text);
+    // Passa o ID do chat (ctx.chat.id) junto com o texto da mensagem
+    const resposta = await askGemini(ctx.chat.id, ctx.message.text);
     await ctx.reply(resposta);
   } catch (error) {
     console.error('Erro no processamento:', error);
@@ -20,16 +26,14 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// Inicia a escuta de mensagens do Telegram
 bot.start({
   onStart: (botInfo) => {
     console.log(`🤖 Bot @${botInfo.username} ativo no Telegram!`);
   },
 });
 
-// Rota HTTP para o Render
 app.get('/', (req, res) => {
-  res.send('Bot do Telegram está rodando!');
+  res.send('Jarvis Telegram Bot está ativo!');
 });
 
 app.listen(PORT, () => {
