@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, webhookCallback } from "grammy";
 import { createServer } from "node:http";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -6,14 +6,16 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ADMIN_ID = process.env.ADMIN_ID || "8133082447";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const RENDER_URL = process.env.RENDER_URL || "https://aprendiz-telegram.onrender.com";
 
 if (!BOT_TOKEN) { console.error("BOT_TOKEN não definido"); process.exit(1); }
 if (!OPENROUTER_API_KEY) { console.error("OPENROUTER_API_KEY não definido"); process.exit(1); }
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { console.error("Supabase não configurado"); process.exit(1); }
 
 const bot = new Bot(BOT_TOKEN);
-const MODEL = "openrouter/free"; // cérebro grátis, escolhe sozinho um modelo que funciona
+const MODEL = "openrouter/free";
 
+// ===== MEMÓRIA NO SUPABASE =====
 async function lerMemoria(chave) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
@@ -35,6 +37,7 @@ async function gravarMemoria(chave, valor) {
   });
 }
 
+// ===== CÉREBRO GRÁTIS (OpenRouter) =====
 async function perguntarIA(prompt) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -56,6 +59,7 @@ async function perguntarIA(prompt) {
 
 function isAdmin(id) { return String(id) === String(ADMIN_ID); }
 
+// ===== COMANDOS =====
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "🤖 Olá! Sou o Jarvis, seu assistente.\n\nMe mande qualquer mensagem!\n\nComandos:\n/memoria <texto> - define memória\n/memoria - ver memória\n/limpar_memoria - limpa tudo\n/historico - ver histórico",
@@ -125,11 +129,34 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-createServer((req, res) => {
-  res.writeHead(200);
-  res.end("ok");
+// ===== WEBHOOK (sem conflito 409) =====
+const webhookPath = `/bot${BOT_TOKEN}`;
+
+createServer(async (req, res) => {
+  if (req.url === "/") {
+    res.writeHead(200);
+    res.end("ok");
+    return;
+  }
+  if (req.url === webhookPath) {
+    try {
+      await webhookCallback(bot, "node-http")(req, res);
+    } catch (err) {
+      console.error("Erro no webhook:", err);
+      res.writeHead(500);
+      res.end("erro");
+    }
+    return;
+  }
+  res.writeHead(404);
+  res.end("não encontrado");
 }).listen(process.env.PORT || 3000);
 
-bot.start().then(() => {
-  console.log("🤖 Jarvis rodando como @" + bot.botInfo.username);
+// Configura o webhook apontando para o Render
+bot.api.setWebhook(`${RENDER_URL}${webhookPath}`, {
+  drop_pending_updates: true,
+}).then(() => {
+  console.log("🤖 Jarvis rodando com WEBHOOK em " + RENDER_URL);
+}).catch((err) => {
+  console.error("Erro ao configurar webhook:", err);
 });
