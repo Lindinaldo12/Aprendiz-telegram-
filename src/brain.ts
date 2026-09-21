@@ -20,6 +20,7 @@ type ChatMessage = {
   content: string;
 };
 
+// Histórico de conversa em memória por chat
 const conversationHistory = new Map<number, ChatMessage[]>();
 
 export async function askOpenRouter(chatId: number, prompt: string): Promise<string> {
@@ -32,19 +33,22 @@ export async function askOpenRouter(chatId: number, prompt: string): Promise<str
 
     history.push({ role: 'user', content: prompt });
 
+    // Limita o histórico às últimas 20 mensagens para otimizar velocidade e contexto
     if (history.length > 21) {
       const systemMsg = history[0];
       const recentMessages = history.slice(history.length - 20);
       history = [systemMsg, ...recentMessages];
     }
 
-    // Modelo com o ID corrigido (3-8b com hífen)
+    // Modelo gratuito e totalmente válido na OpenRouter
+    const selectedModel = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free';
+
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENROUTER_MODEL || 'nousresearch/hermes-3-llama-3-8b:free',
+      model: selectedModel,
       messages: history,
     });
 
-    const replyText = completion.choices[0]?.message?.content || 'Senhor, não obtive resposta da rede.';
+    const replyText = completion.choices[0]?.message?.content || 'Senhor, não obtive resposta do sistema central.';
 
     history.push({ role: 'assistant', content: replyText });
     conversationHistory.set(chatId, history);
