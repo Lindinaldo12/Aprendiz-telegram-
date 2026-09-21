@@ -13,33 +13,56 @@ if (!OPENROUTER_API_KEY) { console.error("OPENROUTER_API_KEY não definido"); pr
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { console.error("Supabase não configurado"); process.exit(1); }
 
 const bot = new Bot(BOT_TOKEN);
-const MODEL_TEXTO = "openrouter/free";           // para mensagens de texto
-const MODEL_VISAO = "google/gemma-4-26b-a4b-it:free"; // para imagens
+const MODEL_TEXTO = "openrouter/free";
+const MODEL_VISAO = "google/gemma-4-26b-a4b-it:free";
 
-// ===== MEMÓRIA NO SUPABASE (nunca some) =====
+// ===== MEMÓRIA NO SUPABASE (UPSERT garantido) =====
 async function lerMemoria(chave) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
-  });
-  const dados = await res.json();
-  return dados?.[0]?.valor ?? null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    const dados = await res.json();
+    return dados?.[0]?.valor ?? null;
+  } catch (err) {
+    console.error(`Erro ao ler memória (${chave}):`, err);
+    return null;
+  }
 }
 
 async function gravarMemoria(chave, valor) {
-  await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}`, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify({ valor, atualizado_em: new Date().toISOString() }),
-  });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/memoria`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({ chave, valor, atualizado_em: new Date().toISOString() }),
+    });
+  } catch (err) {
+    console.error(`Erro ao gravar memória (${chave}):`, err);
+  }
 }
 
 // ===== CÉREBRO (OpenRouter) =====
 async function perguntarIA(messages) {
+  const payloadMessages = messages.map(m => {
+    const texto = m.text || m.content || "";
+    if (m.image) {
+      return {
+        role: "user",
+        content: [
+          { type: "text", text: texto },
+          { type: "image_url", image_url: { url: m.image } },
+        ],
+      };
+    }
+    return { role: m.role, content: texto };
+  });
+
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -48,15 +71,10 @@ async function perguntarIA(messages) {
     },
     body: JSON.stringify({
       model: messages.some(m => m.image) ? MODEL_VISAO : MODEL_TEXTO,
-      messages: messages.map(m => m.image ? {
-        role: "user",
-        content: [
-          { type: "text", text: m.text },
-          { type: "image_url", image_url: { url: m.image } },
-        ],
-      } : { role: m.role, content: m.text }),
+      messages: payloadMessages,
     }),
   });
+
   const dados = await res.json();
   return dados?.choices?.[0]?.message?.content || "Desculpe, não consegui responder agora.";
 }
@@ -84,9 +102,9 @@ async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
     return `🖼️ **${nome}** (${tamanho} KB)\n\n${resposta}`;
   }
 
-  // TEXTO PURO (TXT, MD, JSON, CSV...) → lê direto
-  const textoExtenso = mimeType.startsWith("text/") || [".txt", ".md", ".json", ".csv", ".log"].some(e => nome.endsWith(e));
-  if (textoExtenso) {
+  // TEXTO PURO (TXT, MD, JSON, CSV...)
+  const ehTexto = mimeType.startsWith("text/") || [".txt", ".md", ".json", ".csv", ".log"].some(e => nome.endsWith(e));
+  if (ehTexto) {
     const conteudo = buffer.toString("utf-8").slice(0, 8000);
     const resposta = await perguntarIA([
       { role: "system", content: "Você é o Jarvis. Analise o arquivo enviado e responda em português, direto ao ponto." },
@@ -95,8 +113,8 @@ async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
     return `📄 **${nome}** (${tamanho} KB)\n\n${resposta}`;
   }
 
-  // PDF ou outro formato → tenta ler como texto
-  const conteúdo = buffer.toString("utf-8").replace(/[^\x20-\x7E\u00C0-\u00FF\n\r]/g, " ").slice(0, 8000);
+  // OUTROS FORMATOS (extração simples de caracteres imprimíveis)
+  const conteudo = buffer.toString("utf-8").replace(/[^\x20-\x7E\u00C0-\u00FF\n\r]/g, " ").slice(0, 8000);
   const resposta = await perguntarIA([
     { role: "system", content: "Você é o Jarvis. Analise o conteúdo extraído do arquivo e responda em português, direto ao ponto." },
     { role: "user", content: `${pedido}\n\nConteúdo extraído do arquivo ${nome}:\n${conteudo}` },
@@ -150,7 +168,7 @@ bot.callbackQuery("limpar", async (ctx) => {
 
 bot.callbackQuery("sobre", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("ℹ️ Sou o Jarvis, mais avançado e obediente que o JARVIS do Homem de Ferro. Analiso arquivos e rodando 24h no Render! 🚀");
+  await ctx.reply("ℹ️ Sou o Jarvis, mais avançado e obediente que o JARVIS do Homem de Ferro. Analiso arquivos e rodo 24h no Render! 🚀");
 });
 
 // ===== ARQUIVO ENVIADO (documento) =====
@@ -162,7 +180,7 @@ bot.on("message:document", async (ctx) => {
     const buffer = await baixarArquivo(doc.file_id);
     const mime = doc.mime_type || "application/octet-stream";
     const resposta = await analisarArquivo(ctx, doc.file_name || "arquivo", buffer, mime, ctx.message.caption);
-    await ctx.reply(resposta, { parse_mode: "Markdown" });
+    await ctx.reply(resposta);
   } catch (err) {
     console.error("Erro ao analisar documento:", err);
     await ctx.reply("⚠️ Não consegui analisar esse arquivo. Tente de novo.");
@@ -177,7 +195,7 @@ bot.on("message:photo", async (ctx) => {
   try {
     const buffer = await baixarArquivo(foto.file_id);
     const resposta = await analisarArquivo(ctx, "imagem.jpg", buffer, "image/jpeg", ctx.message.caption);
-    await ctx.reply(resposta, { parse_mode: "Markdown" });
+    await ctx.reply(resposta);
   } catch (err) {
     console.error("Erro ao analisar imagem:", err);
     await ctx.reply("⚠️ Não consegui analisar essa imagem. Tente de novo.");
@@ -213,7 +231,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ===== WEBHOOK (elimina o erro 409) =====
+// ===== WEBHOOK (Servidor HTTP) =====
 const webhookPath = `/bot${BOT_TOKEN}`;
 
 createServer(async (req, res) => {
