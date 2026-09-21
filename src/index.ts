@@ -3,62 +3,62 @@ import { createServer } from "node:http";
 import { createClient } from "@supabase/supabase-js";
 
 // ==========================================
-// 1. CONFIGURAÇÃO E VARIÁVEIS DE AMBIENTE
+// 1. VARIÁVEIS DE AMBIENTE
 // ==========================================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Ex: https://seu-app.onrender.com
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
 
-// Supabase (Opcional - fallback gracioso caso não haja credenciais)
+// Supabase (Opcional - conexão com memória remota se disponível)
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ ERRO CRÍTICO: TELEGRAM_BOT_TOKEN não foi configurado nas variáveis de ambiente!");
+  console.error("❌ ERRO CRÍTICO: TELEGRAM_BOT_TOKEN não foi definido!");
   process.exit(1);
 }
 
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
 
 // ==========================================
-// 2. BRAIN & CONFIGURAÇÕES DOS SUB-AGENTES
+// 2. PROMPTS DOS SUB-AGENTES (BRAIN)
 // ==========================================
 const BRAIN_SYSTEM_PROMPT = `
 Você é o JARVIS, um assistente executivo e orquestrador inteligente.
-Sua função é receber o texto fornecido pelo usuário junto com os relatórios de dois sub-agentes especialistas:
+Sua função é receber o texto fornecido pelo usuário acompanhado das análises de dois sub-agentes:
 1. Sub-Agente Extrator (fatos, datas, valores e dados brutos).
 2. Sub-Agente Auditor (análise de riscos, erros matemáticos e inconformidades).
 
 Sua tarefa:
-- Consolidar as informações de forma clara, profissional e objetiva em português.
-- Destacar alertas críticos e erros apontados pelo Auditor.
-- Fornecer um resumo estruturado e ações recomendadas para o usuário.
+- Consolidar as informações em um relatório final claro, profissional e objetivo em português.
+- Destacar alertas críticos e inconsistências apontadas pelo Auditor.
+- Fornecer um resumo executivo e ações sugeridas.
 `;
 
 const PROMPT_EXTRATOR = `
 Você é o Sub-Agente Extrator.
-Sua missão é extrair estritamente todos os fatos, valores financeiros, datas, nomes, itens e dados estruturados do texto do usuário.
-Não emita opiniões, não julgue riscos. Apenas liste os dados extraídos de forma limpa e organizada.
+Extraia estritamente todos os fatos, valores financeiros, datas, nomes e dados do texto fornecido.
+Não emita opiniões ou avaliações. Apenas liste os dados de forma limpa e estruturada.
 `;
 
 const PROMPT_AUDITOR = `
 Você é o Sub-Agente Auditor.
-Sua missão é analisar o texto do usuário e a extração efetuada.
+Analise o texto fornecido e a extração dos dados.
 Verifique:
-1. Erros de cálculo ou discrepâncias matemáticas (ex: Receita vs Custos vs Lucro).
-2. Riscos operacionais, legais ou financeiros (ex: transferências para contas não cadastradas).
-3. Prazos apertados ou inconformidades.
-Se tudo estiver correto, informe "Sem inconsistências detectadas". Caso contrário, liste os alertas de risco detalhadamente.
+1. Erros de cálculo ou divergências financeiras (ex: Receita vs Custos vs Lucro).
+2. Riscos operacionais, contratuais ou fiscais (ex: pagamentos para contas terceiras).
+3. Prazos inconsistentes ou alertas.
+Se não houver problemas, responda "Nenhuma inconformidade detectada".
 `;
 
 // ==========================================
-// 3. INTEGRAÇÃO COM OPENROUTER
+// 3. INTEGRAÇÃO OPENROUTER
 // ==========================================
 async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2.5-flash") {
   if (!OPENROUTER_API_KEY) {
-    return "⚠️ AVISO: OPENROUTER_API_KEY não configurada. Defina a variável no Render.";
+    return "⚠️ OPENROUTER_API_KEY não configurada nas variáveis do Render.";
   }
 
   try {
@@ -68,7 +68,7 @@ async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
         "HTTP-Referer": RENDER_EXTERNAL_URL || "https://render.com",
-        "X-Title": "Jarvis Telegram Pipeline"
+        "X-Title": "Jarvis Bot Pipeline"
       },
       body: JSON.stringify({
         model: model,
@@ -81,171 +81,125 @@ async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error(`Erro OpenRouter HTTP ${response.status}:`, errText);
-      return `[Erro no modelo ${model}: HTTP ${response.status}]`;
+      const err = await response.text();
+      console.error(`Erro OpenRouter [${response.status}]:`, err);
+      return `[Erro OpenRouter HTTP ${response.status}]`;
     }
 
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "[Sem resposta do modelo]";
+    return data.choices?.[0]?.message?.content || "[Sem resposta da IA]";
   } catch (error) {
-    console.error("Falha ao chamar OpenRouter:", error);
-    return `[Erro na requisição da IA: ${error.message}]`;
+    console.error("Erro na requisição OpenRouter:", error);
+    return `[Falha na conexão com a IA: ${error.message}]`;
   }
 }
 
 // ==========================================
 // 4. PIPELINE MULTI-AGENTE
 // ==========================================
-async function processarPipeline(textoUsuario) {
-  console.log("🔄 [Pipeline] Executando Sub-Agente Extrator...");
-  const dadosExtraidos = await callOpenRouter(PROMPT_EXTRATOR, textoUsuario);
+async function processarPipeline(texto) {
+  console.log("🔄 Executando Sub-Agente Extrator...");
+  const ext = await callOpenRouter(PROMPT_EXTRATOR, texto);
 
-  console.log("🔄 [Pipeline] Executando Sub-Agente Auditor...");
-  const relatorioAuditoria = await callOpenRouter(
-    PROMPT_AUDITOR, 
-    `Texto Original:\n${textoUsuario}\n\nExtração:\n${dadosExtraidos}`
-  );
+  console.log("🔄 Executando Sub-Agente Auditor...");
+  const aud = await callOpenRouter(PROMPT_AUDITOR, `Texto Original:\n${texto}\n\nDados Extraídos:\n${ext}`);
 
-  console.log("🔄 [Pipeline] Executando Jarvis Consolidador...");
-  const contextoConsolidacao = `
-  TEXTO ENVIADO PELO USUÁRIO:
-  ${textoUsuario}
+  console.log("🔄 Executando Jarvis Consolidador...");
+  const contextoFinal = `
+ENTRADA DO USUÁRIO:
+${texto}
 
-  ---
-  RELATÓRIO DO SUB-AGENTE EXTRATOR:
-  ${dadosExtraidos}
+ANÁLISE DO EXTRATOR:
+${ext}
 
-  ---
-  RELATÓRIO DO SUB-AGENTE AUDITOR:
-  ${relatorioAuditoria}
-  `;
+ANÁLISE DO AUDITOR:
+${aud}
+`;
 
-  const respostaFinal = await callOpenRouter(BRAIN_SYSTEM_PROMPT, contextoConsolidacao);
-
-  return {
-    dadosExtraidos,
-    relatorioAuditoria,
-    respostaFinal
-  };
+  const respostaFinal = await callOpenRouter(BRAIN_SYSTEM_PROMPT, contextoFinal);
+  return respostaFinal;
 }
 
 // ==========================================
-// 5. HANDLERS DO BOT (TELEGRAM)
+// 5. EVENTOS DO TELEGRAM BOT
 // ==========================================
 bot.command("start", async (ctx) => {
-  await ctx.reply(
-    "🤖 *Jarvis Online*\n\n" +
-    "O pipeline de sub-agentes (Extrator + Auditor) está pronto para uso.\n" +
-    "Envie qualquer relatório, arquivo ou mensagem de texto para iniciar a análise.",
-    { parse_mode: "Markdown" }
-  );
+  await ctx.reply("🤖 *Jarvis Online*\n\nPipeline de sub-agentes pronto. Envie uma mensagem ou arquivo para análise.", { parse_mode: "Markdown" });
 });
 
 bot.command("ping", async (ctx) => {
-  await ctx.reply("🏓 Pong! Servidor e sub-agentes operando normalmente.");
+  await ctx.reply("🏓 Pong! Servidor ativo.");
 });
 
 bot.on("message:text", async (ctx) => {
-  const texto = ctx.message.text;
-  
-  // Ignora outros comandos não mapeados
-  if (texto.startsWith("/")) return;
+  if (ctx.message.text.startsWith("/")) return;
 
-  const statusMsg = await ctx.reply("⏳ *Jarvis:* Processando pipeline de sub-agentes...", { parse_mode: "Markdown" });
+  const status = await ctx.reply("⏳ *Jarvis:* Analisando dados no pipeline...", { parse_mode: "Markdown" });
 
   try {
-    const resultado = await processarPipeline(texto);
-
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      resultado.respostaFinal
-    );
+    const resultado = await processarPipeline(ctx.message.text);
+    await ctx.api.editMessageText(ctx.chat.id, status.message_id, resultado);
   } catch (err) {
-    console.error("Erro ao processar mensagem:", err);
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      "❌ Ocorreu um erro ao processar sua solicitação no pipeline."
-    );
+    console.error("Erro no processamento:", err);
+    await ctx.api.editMessageText(ctx.chat.id, status.message_id, "❌ Erro ao processar mensagem no pipeline.");
   }
 });
 
-// Suporte para documentos de texto (.txt, .md, .csv)
 bot.on("message:document", async (ctx) => {
-  const doc = ctx.message.document;
-  const statusMsg = await ctx.reply("📄 *Jarvis:* Baixando e analisando documento...", { parse_mode: "Markdown" });
+  const status = await ctx.reply("📄 *Jarvis:* Lendo documento...", { parse_mode: "Markdown" });
 
   try {
     const file = await ctx.getFile();
     const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    
-    const response = await fetch(fileUrl);
-    const textContent = await response.text();
+    const res = await fetch(fileUrl);
+    const textContent = await res.text();
 
     const resultado = await processarPipeline(textContent);
-
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      resultado.respostaFinal
-    );
+    await ctx.api.editMessageText(ctx.chat.id, status.message_id, resultado);
   } catch (err) {
-    console.error("Erro ao processar documento:", err);
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      "❌ Erro ao ler o arquivo enviado. Certifique-se de que é um arquivo de texto válido."
-    );
+    console.error("Erro ao ler documento:", err);
+    await ctx.api.editMessageText(ctx.chat.id, status.message_id, "❌ Falha ao processar o arquivo enviado.");
   }
 });
 
 // ==========================================
-// 6. SERVIDOR HTTP NATIVO & WEBHOOK RENDER
+// 6. SERVIDOR HTTP NATIVO & WEBHOOK
 // ==========================================
 const webhookPath = `/telegram-webhook`;
 
 const server = createServer(async (req, res) => {
-  // Rota de Healthcheck do Render
   if (req.url === "/" || req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("OK - Jarvis Bot em execução.");
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
     return;
   }
 
-  // Rota do Webhook do Telegram
   if (req.url === webhookPath && req.method === "POST") {
     try {
-      // FIX CRÍTICO: Usando "http" em vez de "node-http"
+      // Uso correto do adaptador "http" para grammY
       await webhookCallback(bot, "http")(req, res);
     } catch (err) {
-      console.error("Erro ao processar atualização do Webhook:", err);
+      console.error("Erro no Webhook:", err);
       res.writeHead(500);
-      res.end("Erro Interno");
+      res.end("Error");
     }
     return;
   }
 
-  // Rota Não Encontrada
   res.writeHead(404);
-  res.end("Não encontrado");
+  res.end("Not Found");
 });
 
-// Inicialização do Servidor
 server.listen(PORT, async () => {
-  console.log(`🚀 Servidor HTTP rodando na porta ${PORT}`);
+  console.log(`🚀 Servidor escutando na porta ${PORT}`);
 
-  // Configuração automática do Webhook no Render
   if (RENDER_EXTERNAL_URL) {
-    const fullWebhookUrl = `${RENDER_EXTERNAL_URL}${webhookPath}`;
+    const url = `${RENDER_EXTERNAL_URL}${webhookPath}`;
     try {
-      await bot.api.setWebhook(fullWebhookUrl);
-      console.log(`🔗 Webhook do Telegram configurado com sucesso: ${fullWebhookUrl}`);
+      await bot.api.setWebhook(url);
+      console.log(`🔗 Webhook registrado: ${url}`);
     } catch (err) {
-      console.error("❌ Falha ao registrar Webhook no Telegram:", err.message);
+      console.error("Erro ao registrar webhook:", err.message);
     }
-  } else {
-    console.log("⚠️ RENDER_EXTERNAL_URL não detectada. Webhook não configurado automaticamente.");
   }
 });
