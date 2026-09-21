@@ -10,13 +10,13 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
 
-// Supabase (Opcional - conexão com memória remota se disponível)
+// Supabase (Conexão opcional com banco de dados)
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ ERRO CRÍTICO: TELEGRAM_BOT_TOKEN não foi definido!");
+  console.error("❌ ERRO CRÍTICO: TELEGRAM_BOT_TOKEN não foi configurado!");
   process.exit(1);
 }
 
@@ -27,7 +27,7 @@ const bot = new Bot(TELEGRAM_BOT_TOKEN);
 // ==========================================
 const BRAIN_SYSTEM_PROMPT = `
 Você é o JARVIS, um assistente executivo e orquestrador inteligente.
-Sua função é receber o texto fornecido pelo usuário acompanhado das análises de dois sub-agentes:
+Sua função é receber o texto fornecido pelo usuário acompanhado dos relatórios dos dois sub-agentes:
 1. Sub-Agente Extrator (fatos, datas, valores e dados brutos).
 2. Sub-Agente Auditor (análise de riscos, erros matemáticos e inconformidades).
 
@@ -39,26 +39,26 @@ Sua tarefa:
 
 const PROMPT_EXTRATOR = `
 Você é o Sub-Agente Extrator.
-Extraia estritamente todos os fatos, valores financeiros, datas, nomes e dados do texto fornecido.
+Sua missão é extrair estritamente todos os fatos, valores financeiros, datas, nomes e dados do texto.
 Não emita opiniões ou avaliações. Apenas liste os dados de forma limpa e estruturada.
 `;
 
 const PROMPT_AUDITOR = `
 Você é o Sub-Agente Auditor.
-Analise o texto fornecido e a extração dos dados.
+Sua missão é analisar o texto e a extração efetuada.
 Verifique:
-1. Erros de cálculo ou divergências financeiras (ex: Receita vs Custos vs Lucro).
-2. Riscos operacionais, contratuais ou fiscais (ex: pagamentos para contas terceiras).
+1. Erros de cálculo ou discrepâncias financeiras (ex: Receita vs Custos vs Lucro).
+2. Riscos operacionais, contratuais ou fiscais (ex: pagamentos para contas não cadastradas).
 3. Prazos inconsistentes ou alertas.
-Se não houver problemas, responda "Nenhuma inconformidade detectada".
+Se tudo estiver correto, informe "Nenhuma inconformidade detectada". Caso contrário, liste os alertas de risco.
 `;
 
 // ==========================================
-// 3. INTEGRAÇÃO OPENROUTER
+// 3. INTEGRAÇÃO COM OPENROUTER
 // ==========================================
 async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2.5-flash") {
   if (!OPENROUTER_API_KEY) {
-    return "⚠️ OPENROUTER_API_KEY não configurada nas variáveis do Render.";
+    return "⚠️ AVISO: OPENROUTER_API_KEY não foi configurada nas variáveis do Render.";
   }
 
   try {
@@ -68,7 +68,7 @@ async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
         "HTTP-Referer": RENDER_EXTERNAL_URL || "https://render.com",
-        "X-Title": "Jarvis Bot Pipeline"
+        "X-Title": "Jarvis Telegram Pipeline"
       },
       body: JSON.stringify({
         model: model,
@@ -81,125 +81,136 @@ async function callOpenRouter(systemPrompt, userPrompt, model = "google/gemini-2
     });
 
     if (!response.ok) {
-      const err = await response.text();
-      console.error(`Erro OpenRouter [${response.status}]:`, err);
-      return `[Erro OpenRouter HTTP ${response.status}]`;
+      const errText = await response.text();
+      console.error(`Erro OpenRouter HTTP ${response.status}:`, errText);
+      return `[Erro no modelo ${model}: HTTP ${response.status}]`;
     }
 
     const data = await response.json();
     return data.choices?.[0]?.message?.content || "[Sem resposta da IA]";
   } catch (error) {
-    console.error("Erro na requisição OpenRouter:", error);
-    return `[Falha na conexão com a IA: ${error.message}]`;
+    console.error("Falha ao chamar OpenRouter:", error);
+    return `[Erro na requisição da IA: ${error.message}]`;
   }
 }
 
 // ==========================================
 // 4. PIPELINE MULTI-AGENTE
 // ==========================================
-async function processarPipeline(texto) {
+async function processarPipeline(textoUsuario) {
   console.log("🔄 Executando Sub-Agente Extrator...");
-  const ext = await callOpenRouter(PROMPT_EXTRATOR, texto);
+  const dadosExtraidos = await callOpenRouter(PROMPT_EXTRATOR, textoUsuario);
 
   console.log("🔄 Executando Sub-Agente Auditor...");
-  const aud = await callOpenRouter(PROMPT_AUDITOR, `Texto Original:\n${texto}\n\nDados Extraídos:\n${ext}`);
+  const relatorioAuditoria = await callOpenRouter(
+    PROMPT_AUDITOR, 
+    `Texto Original:\n${textoUsuario}\n\nExtração:\n${dadosExtraidos}`
+  );
 
   console.log("🔄 Executando Jarvis Consolidador...");
-  const contextoFinal = `
-ENTRADA DO USUÁRIO:
-${texto}
+  const contextoConsolidacao = `
+TEXTO ENVIADO PELO USUÁRIO:
+${textoUsuario}
 
-ANÁLISE DO EXTRATOR:
-${ext}
+---
+RELATÓRIO DO SUB-AGENTE EXTRATOR:
+${dadosExtraidos}
 
-ANÁLISE DO AUDITOR:
-${aud}
+---
+RELATÓRIO DO SUB-AGENTE AUDITOR:
+${relatorioAuditoria}
 `;
 
-  const respostaFinal = await callOpenRouter(BRAIN_SYSTEM_PROMPT, contextoFinal);
+  const respostaFinal = await callOpenRouter(BRAIN_SYSTEM_PROMPT, contextoConsolidacao);
   return respostaFinal;
 }
 
 // ==========================================
-// 5. EVENTOS DO TELEGRAM BOT
+// 5. EVENTOS DO BOT
 // ==========================================
 bot.command("start", async (ctx) => {
-  await ctx.reply("🤖 *Jarvis Online*\n\nPipeline de sub-agentes pronto. Envie uma mensagem ou arquivo para análise.", { parse_mode: "Markdown" });
+  await ctx.reply(
+    "🤖 *Jarvis Online*\n\n" +
+    "O pipeline de sub-agentes está pronto para uso.\n" +
+    "Envie qualquer relatório, arquivo ou mensagem de texto para análise.",
+    { parse_mode: "Markdown" }
+  );
 });
 
 bot.command("ping", async (ctx) => {
-  await ctx.reply("🏓 Pong! Servidor ativo.");
+  await ctx.reply("🏓 Pong! Servidor operando normalmente.");
 });
 
 bot.on("message:text", async (ctx) => {
-  if (ctx.message.text.startsWith("/")) return;
+  const texto = ctx.message.text;
+  if (texto.startsWith("/")) return;
 
-  const status = await ctx.reply("⏳ *Jarvis:* Analisando dados no pipeline...", { parse_mode: "Markdown" });
+  const statusMsg = await ctx.reply("⏳ *Jarvis:* Processando pipeline de sub-agentes...", { parse_mode: "Markdown" });
 
   try {
-    const resultado = await processarPipeline(ctx.message.text);
-    await ctx.api.editMessageText(ctx.chat.id, status.message_id, resultado);
+    const resultado = await processarPipeline(texto);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
   } catch (err) {
-    console.error("Erro no processamento:", err);
-    await ctx.api.editMessageText(ctx.chat.id, status.message_id, "❌ Erro ao processar mensagem no pipeline.");
+    console.error("Erro ao processar mensagem:", err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "❌ Erro ao processar mensagem no pipeline.");
   }
 });
 
 bot.on("message:document", async (ctx) => {
-  const status = await ctx.reply("📄 *Jarvis:* Lendo documento...", { parse_mode: "Markdown" });
+  const statusMsg = await ctx.reply("📄 *Jarvis:* Lendo e analisando documento...", { parse_mode: "Markdown" });
 
   try {
     const file = await ctx.getFile();
     const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    const res = await fetch(fileUrl);
-    const textContent = await res.text();
+    const response = await fetch(fileUrl);
+    const textContent = await response.text();
 
     const resultado = await processarPipeline(textContent);
-    await ctx.api.editMessageText(ctx.chat.id, status.message_id, resultado);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
   } catch (err) {
-    console.error("Erro ao ler documento:", err);
-    await ctx.api.editMessageText(ctx.chat.id, status.message_id, "❌ Falha ao processar o arquivo enviado.");
+    console.error("Erro ao processar documento:", err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "❌ Erro ao ler o arquivo enviado.");
   }
 });
 
 // ==========================================
-// 6. SERVIDOR HTTP NATIVO & WEBHOOK
+// 6. SERVIDOR HTTP NATIVO & WEBHOOK RENDER
 // ==========================================
 const webhookPath = `/telegram-webhook`;
 
 const server = createServer(async (req, res) => {
   if (req.url === "/" || req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("OK");
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("OK - Jarvis Bot em execução.");
     return;
   }
 
   if (req.url === webhookPath && req.method === "POST") {
     try {
-      // Uso correto do adaptador "http" para grammY
+      // FIX: Adaptador "http" exige letras minúsculas para grammY no Node.js
       await webhookCallback(bot, "http")(req, res);
     } catch (err) {
-      console.error("Erro no Webhook:", err);
+      console.error("Erro no webhook:", err);
       res.writeHead(500);
-      res.end("Error");
+      res.end("Erro Interno");
     }
     return;
   }
 
   res.writeHead(404);
-  res.end("Not Found");
+  res.end("Não encontrado");
 });
 
 server.listen(PORT, async () => {
-  console.log(`🚀 Servidor escutando na porta ${PORT}`);
+  console.log(`🚀 Servidor HTTP rodando na porta ${PORT}`);
 
   if (RENDER_EXTERNAL_URL) {
-    const url = `${RENDER_EXTERNAL_URL}${webhookPath}`;
+    const fullWebhookUrl = `${RENDER_EXTERNAL_URL}${webhookPath}`;
     try {
-      await bot.api.setWebhook(url);
-      console.log(`🔗 Webhook registrado: ${url}`);
+      await bot.api.setWebhook(fullWebhookUrl);
+      console.log(`🔗 Webhook configurado com sucesso: ${fullWebhookUrl}`);
     } catch (err) {
-      console.error("Erro ao registrar webhook:", err.message);
+      console.error("❌ Falha ao registrar Webhook no Telegram:", err.message);
     }
   }
 });
