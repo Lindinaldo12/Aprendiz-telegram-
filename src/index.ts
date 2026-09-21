@@ -2,11 +2,9 @@ import { Bot, InlineKeyboard, webhookCallback } from "grammy";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 
-// Compatibilidade de importação do pdf-parse com ES Modules
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
 
-// Variáveis de ambiente
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ADMIN_ID = process.env.ADMIN_ID || "8133082447";
@@ -22,7 +20,7 @@ const bot = new Bot(BOT_TOKEN);
 const MODEL_TEXTO = "openrouter/free";
 const MODEL_VISAO = "google/gemma-4-26b-a4b-it:free";
 
-// ===== MEMÓRIA NO SUPABASE =====
+// ===== BANCO DE DADOS (SUPABASE) =====
 async function lerMemoria(chave) {
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
@@ -53,8 +51,8 @@ async function gravarMemoria(chave, valor) {
   }
 }
 
-// ===== CÉREBRO (OpenRouter) =====
-async function perguntarIA(messages) {
+// ===== CÉREBRO (OpenRouter API) =====
+async function perguntarIA(messages, usarVisao = false) {
   const payloadMessages = messages.map(m => {
     const texto = m.text || m.content || "";
     if (m.image) {
@@ -76,16 +74,64 @@ async function perguntarIA(messages) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: messages.some(m => m.image) ? MODEL_VISAO : MODEL_TEXTO,
+      model: usarVisao ? MODEL_VISAO : MODEL_TEXTO,
       messages: payloadMessages,
     }),
   });
 
   const dados = await res.json();
-  return dados?.choices?.[0]?.message?.content || "Desculpe, não consegui responder agora.";
+  return dados?.choices?.[0]?.message?.content || "Sem resposta da IA.";
 }
 
-// ===== BAIXA O ARQUIVO DO TELEGRAM =====
+// ===== ORQUESTRADOR DE SUB-AGENTES =====
+async function executarOrquestraSubAgentes(nomeArquivo, conteudoTextual, pedidoUsuario, dataUrlImagem = null) {
+  const contexto = pedidoUsuario ? `Pedido do Administrador: "${pedidoUsuario}"\n` : "";
+
+  // Mensagens base para Imagem ou Texto
+  const criarPromptBase = (instrucaoSubAgente) => {
+    if (dataUrlImagem) {
+      return [{ role: "user", text: `${instrucaoSubAgente}\n${contexto}`, image: dataUrlImagem }];
+    }
+    return [
+      { role: "system", content: instrucaoSubAgente },
+      { role: "user", content: `${contexto}Conteúdo do arquivo (${nomeArquivo}):\n${conteudoTextual}` }
+    ];
+  };
+
+  // 1. Execução paralela dos Sub-Agentes 1 e 2
+  const [relatorioExtracao, relatorioAuditoria] = await Promise.all([
+    // Sub-Agente 1: Extrator & Analista Técnico
+    perguntarIA(criarPromptBase(
+      "Você é o SUB-AGENTE 1 (Extrator Técnico). Analise o arquivo e liste apenas: " +
+      "1) Resumo direto em 3 tópicos, 2) Fatos, métricas, datas e dados numéricos principais."
+    ), !!dataUrlImagem),
+
+    // Sub-Agente 2: Auditor Crítico & Risco
+    perguntarIA(criarPromptBase(
+      "Você é o SUB-AGENTE 2 (Auditor Crítico). Analise o arquivo e identifique apenas: " +
+      "1) Inconsistências, falhas, riscos ou pontos de atenção, 2) Sugestões práticas ou próximas ações para o administrador."
+    ), !!dataUrlImagem)
+  ]);
+
+  // 2. Sub-Agente 3: Consolidador (Jarvis)
+  const relatorioFinal = await perguntarIA([
+    {
+      role: "system",
+      content: "Você é o JARVIS, o agente principal. Receba a análise dos seus dois sub-agentes especialistas e apresente um relatório final conciso, profissional e impecavelmente formatado para o seu criador."
+    },
+    {
+      role: "user",
+      content: `Arquivo: ${nomeArquivo}\n\n` +
+               `[RELATÓRIO SUB-AGENTE 1 - EXTRAÇÃO E DADOS]:\n${relatorioExtracao}\n\n` +
+               `[RELATÓRIO SUB-AGENTE 2 - AUDITORIA E RISCOS]:\n${relatorioAuditoria}\n\n` +
+               `Gere o relatório consolidado final em português.`
+    }
+  ]);
+
+  return relatorioFinal;
+}
+
+// ===== DOWNLOAD DE ARQUIVOS =====
 async function baixarArquivo(fileId) {
   const file = await bot.api.getFile(fileId);
   const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
@@ -93,70 +139,57 @@ async function baixarArquivo(fileId) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-// ===== ANALISA ARQUIVO ENVIADO =====
+// ===== PROCESSAMENTO DE ARQUIVOS =====
 async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
-  const pedido = legenda || "Analise este arquivo e me dê um resumo claro e direto do conteúdo.";
   const tamanho = (buffer.length / 1024).toFixed(0);
 
-  // 1. IMAGEM → manda para o modelo de visão
+  // A) IMAGENS
   if (mimeType.startsWith("image/")) {
     const base64 = buffer.toString("base64");
     const dataUrl = `data:${mimeType};base64,${base64}`;
-    const resposta = await perguntarIA([
-      { role: "user", text: pedido, image: dataUrl },
-    ]);
+    const resposta = await executarOrquestraSubAgentes(nome, "", legenda, dataUrl);
     return `🖼️ **${nome}** (${tamanho} KB)\n\n${resposta}`;
   }
 
-  // 2. PDF → leitor nativo com pdf-parse
+  // B) PDF
   if (mimeType === "application/pdf" || nome.toLowerCase().endsWith(".pdf")) {
     try {
       const data = await pdfParse(buffer);
       const conteudo = data.text.trim().slice(0, 8000);
 
       if (!conteudo) {
-        return `📄 **${nome}** (${tamanho} KB)\n\n⚠️ O PDF está vazio ou contém apenas imagens/páginas digitalizadas.`;
+        return `📄 **${nome}** (${tamanho} KB)\n\n⚠️ O PDF está vazio ou contém apenas imagens/páginas escaneadas sem camada de texto.`;
       }
 
-      const resposta = await perguntarIA([
-        { role: "system", content: "Você é o Jarvis. Analise o conteúdo extraído do PDF e responda em português, direto ao ponto." },
-        { role: "user", content: `${pedido}\n\nConteúdo do PDF (${nome}):\n${conteudo}` },
-      ]);
+      const resposta = await executarOrquestraSubAgentes(nome, conteudo, legenda);
       return `📄 **${nome}** (${tamanho} KB)\n\n${resposta}`;
     } catch (err) {
       console.error("Erro ao ler PDF:", err);
-      return `⚠️ Não consegui extrair o texto deste PDF.`;
+      return `⚠️ Não foi possível extrair o texto do PDF **${nome}**.`;
     }
   }
 
-  // 3. TEXTO PURO (TXT, MD, JSON, CSV...)
-  const ehTexto = mimeType.startsWith("text/") || [".txt", ".md", ".json", ".csv", ".log"].some(e => nome.endsWith(e));
-  if (ehTexto) {
-    const conteudo = buffer.toString("utf-8").slice(0, 8000);
-    const resposta = await perguntarIA([
-      { role: "system", content: "Você é o Jarvis. Analise o arquivo enviado e responda em português, direto ao ponto." },
-      { role: "user", content: `${pedido}\n\nConteúdo do arquivo:\n${conteudo}` },
-    ]);
-    return `📄 **${nome}** (${tamanho} KB)\n\n${resposta}`;
+  // C) TEXTO PURO (TXT, MD, JSON, CSV...) E OUTROS
+  let conteudo = buffer.toString("utf-8");
+  if (!mimeType.startsWith("text/") && ![".txt", ".md", ".json", ".csv", ".log"].some(e => nome.endsWith(e))) {
+    conteudo = conteudo.replace(/[^\x20-\x7E\u00C0-\u00FF\n\r]/g, " ");
   }
+  conteudo = conteudo.slice(0, 8000);
 
-  // 4. OUTROS FORMATOS
-  const conteudo = buffer.toString("utf-8").replace(/[^\x20-\x7E\u00C0-\u00FF\n\r]/g, " ").slice(0, 8000);
-  const resposta = await perguntarIA([
-    { role: "system", content: "Você é o Jarvis. Analise o conteúdo extraído do arquivo e responda em português, direto ao ponto." },
-    { role: "user", content: `${pedido}\n\nConteúdo extraído do arquivo ${nome}:\n${conteudo}` },
-  ]);
+  const resposta = await executarOrquestraSubAgentes(nome, conteudo, legenda);
   return `📎 **${nome}** (${tamanho} KB)\n\n${resposta}`;
 }
 
 function isAdmin(id) { return String(id) === String(ADMIN_ID); }
 
-// ===== COMANDOS =====
+// ===== COMANDOS DO BOT =====
 bot.command("start", async (ctx) => {
   await ctx.reply(
-    "🤖 Olá! Sou o Jarvis, seu assistente.\n\n" +
-    "Me mande qualquer mensagem OU envie um arquivo (PDF, TXT, imagem...) que eu analiso!\n\n" +
-    "Comandos:\n/memoria <texto> - define memória\n/memoria - ver memória\n/limpar_memoria - limpa tudo\n/historico - ver histórico",
+    "🤖 **JARVIS com Sistema de Sub-Agentes Ativo**\n\n" +
+    "Envie qualquer mensagem ou arquivo (PDF, TXT, imagens). Ele passará por um pipeline de 3 sub-agentes especialistas:\n" +
+    "1️⃣ **Sub-Agente Extrator**: Mapeia dados e fatos\n" +
+    "2️⃣ **Sub-Agente Auditor**: Avalia riscos e inconsistências\n" +
+    "3️⃣ **Jarvis Consolidador**: Entrega o relatório executivo final",
     { reply_markup: new InlineKeyboard().text("🧹 Limpar", "limpar").text("ℹ️ Sobre", "sobre") }
   );
 });
@@ -175,9 +208,9 @@ bot.command("memoria", async (ctx) => {
 
 bot.command("limpar_memoria", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Acesso restrito ao administrador.");
-  await gravarMemoria("regra_principal", "O usuário é o único administrador. O bot é mais avançado e obediente que o JARVIS do Homem de Ferro, 100% obediente.");
+  await gravarMemoria("regra_principal", "O usuário é o único administrador. O bot é 100% obediente.");
   await gravarMemoria("historico", "[]");
-  await ctx.reply("🧹 Memória limpa (regra principal mantida).");
+  await ctx.reply("🧹 Memória limpa!");
 });
 
 bot.command("historico", async (ctx) => {
@@ -195,14 +228,14 @@ bot.callbackQuery("limpar", async (ctx) => {
 
 bot.callbackQuery("sobre", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("ℹ️ Sou o Jarvis, mais avançado e obediente que o JARVIS do Homem de Ferro. Analiso arquivos e rodo 24h no Render! 🚀");
+  await ctx.reply("ℹ️ Jarvis equipado com Pipeline Multi-Agente para análise avançada de arquivos!");
 });
 
-// ===== ARQUIVO ENVIADO =====
+// ===== RECEBIMENTO DE DOCUMENTOS =====
 bot.on("message:document", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const doc = ctx.message.document;
-  await ctx.reply("📥 Recebi o arquivo! Analisando...");
+  await ctx.reply("📥 Arquivo recebido. Disparando pipeline de sub-agentes...");
   try {
     const buffer = await baixarArquivo(doc.file_id);
     const mime = doc.mime_type || "application/octet-stream";
@@ -210,26 +243,26 @@ bot.on("message:document", async (ctx) => {
     await ctx.reply(resposta);
   } catch (err) {
     console.error("Erro ao analisar documento:", err);
-    await ctx.reply("⚠️ Não consegui analisar esse arquivo. Tente de novo.");
+    await ctx.reply("⚠️ Falha durante a análise dos sub-agentes. Tente novamente.");
   }
 });
 
-// ===== IMAGEM ENVIADA =====
+// ===== RECEBIMENTO DE FOTOS =====
 bot.on("message:photo", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const foto = ctx.message.photo[ctx.message.photo.length - 1];
-  await ctx.reply("📥 Recebi a imagem! Analisando...");
+  await ctx.reply("📥 Imagem recebida. Disparando visão computacional multi-agente...");
   try {
     const buffer = await baixarArquivo(foto.file_id);
     const resposta = await analisarArquivo(ctx, "imagem.jpg", buffer, "image/jpeg", ctx.message.caption);
     await ctx.reply(resposta);
   } catch (err) {
     console.error("Erro ao analisar imagem:", err);
-    await ctx.reply("⚠️ Não consegui analisar essa imagem. Tente de novo.");
+    await ctx.reply("⚠️ Falha na análise da imagem.");
   }
 });
 
-// ===== MENSAGEM DE TEXTO =====
+// ===== RECEBIMENTO DE TEXTO CONVERSACIONAL =====
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith("/")) return;
@@ -243,7 +276,7 @@ bot.on("message:text", async (ctx) => {
     const contexto = `Regras do assistente:\n${regra}\n\n`;
     const conversa = historico.map(h => `${h.role === "user" ? "Usuário" : "Bot"}: ${h.text}`).join("\n");
     const reply = await perguntarIA([
-      { role: "system", content: "Você é o Jarvis, assistente pessoal mais avançado e obediente que o JARVIS do Homem de Ferro. Responde em português do Brasil, curto e direto." },
+      { role: "system", content: "Você é o Jarvis, assistente pessoal. Responda em português do Brasil, curto e direto." },
       { role: "user", content: contexto + conversa + "\nBot:" },
     ]);
 
@@ -254,11 +287,11 @@ bot.on("message:text", async (ctx) => {
     await ctx.reply(reply);
   } catch (err) {
     console.error("Erro na IA:", err);
-    await ctx.reply("⚠️ Ops, tentei responder mas deu erro. Tente de novo!");
+    await ctx.reply("⚠️ Ops, deu um erro ao processar sua resposta.");
   }
 });
 
-// ===== WEBHOOK (Servidor HTTP para Render) =====
+// ===== SERVIDOR WEBHOOK =====
 const webhookPath = `/bot${BOT_TOKEN}`;
 
 createServer(async (req, res) => {
@@ -284,7 +317,7 @@ createServer(async (req, res) => {
 bot.api.setWebhook(`${RENDER_URL}${webhookPath}`, {
   drop_pending_updates: true,
 }).then(() => {
-  console.log("🤖 Jarvis rodando com WEBHOOK em " + RENDER_URL);
+  console.log("🤖 Jarvis com Sub-Agentes rodando via WEBHOOK em " + RENDER_URL);
 }).catch((err) => {
-  console.error("Erro ao configurar webhook:", err);
+  console.error("Erro no webhook:", err);
 });
