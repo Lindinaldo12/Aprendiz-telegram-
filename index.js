@@ -142,29 +142,32 @@ bot.command('criar_agente', async (ctx) => {
 
   const statusMsg = await ctx.reply(`Criando sub-agente ${nome}...`);
 
-  try {
-    const systemPrompt = await askOpenRouter([
-      {
-        role: 'system',
-        content: `Voce e um especialista em criar sub-agentes de IA. Gere um system prompt profissional e objetivo em portugues para um sub-agente chamado "${nome}" cuja funcao e: ${descricao}. Responda APENAS com o system prompt, sem explicacoes.`,
-      },
-      { role: 'user', content: `Crie o system prompt para o sub-agente ${nome}.` },
-    ], { temperature: 0.4 });
+  // Responde na hora e processa em segundo plano (evita timeout)
+  (async () => {
+    try {
+      const systemPrompt = await askOpenRouter([
+        {
+          role: 'system',
+          content: `Voce e um especialista em criar sub-agentes de IA. Gere um system prompt profissional e objetivo em portugues para um sub-agente chamado "${nome}" cuja funcao e: ${descricao}. Responda APENAS com o system prompt, sem explicacoes.`,
+        },
+        { role: 'user', content: `Crie o system prompt para o sub-agente ${nome}.` },
+      ], { temperature: 0.4 });
 
-    await createAgent(nome, systemPrompt);
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      `Sub-agente ${nome} criado com sucesso!\n\nPrompt gerado:\n${systemPrompt}\n\nUse: /executar ${nome} | sua mensagem`
-    );
-  } catch (err) {
-    console.error('Erro ao criar agente:', err);
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      `Erro ao criar o sub-agente.\n\nDetalhe: ${err?.message || err}\n\nDica: se for "rate limit" ou "429", os modelos gratuitos estao cheios. Tente de novo em alguns minutos.`
-    );
-  }
+      await createAgent(nome, systemPrompt);
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `Sub-agente ${nome} criado com sucesso!\n\nPrompt gerado:\n${systemPrompt}\n\nUse: /executar ${nome} | sua mensagem`
+      );
+    } catch (err) {
+      console.error('Erro ao criar agente:', err);
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `Erro ao criar o sub-agente.\n\nDetalhe: ${err?.message || err}\n\nDica: se for "rate limit" ou "429", adicione creditos no OpenRouter ou tente de novo em alguns minutos.`
+      );
+    }
+  })();
 });
 
 bot.command('executar', async (ctx) => {
@@ -176,13 +179,15 @@ bot.command('executar', async (ctx) => {
   const [nome, mensagem] = args.split('|').map((s) => s.trim());
   const statusMsg = await ctx.reply(`Executando sub-agente ${nome}...`);
 
-  try {
-    const resultado = await executarAgente(nome, mensagem);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-  } catch (err) {
-    console.error('Erro ao executar agente:', err);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao executar o sub-agente.');
-  }
+  (async () => {
+    try {
+      const resultado = await executarAgente(nome, mensagem);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+    } catch (err) {
+      console.error('Erro ao executar agente:', err);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao executar o sub-agente.');
+    }
+  })();
 });
 
 bot.command('deletar_agente', async (ctx) => {
@@ -199,36 +204,37 @@ bot.on('message:text', async (ctx) => {
   const texto = ctx.message.text;
   if (texto.startsWith('/')) return;
 
-  const statusMsg = await ctx.reply('JARVIS: Processando pipeline de sub-agentes...');
+  // Responde na hora, sem esperar a IA (evita timeout de 10s)
+  const statusMsg = await ctx.reply('JARVIS: Processando...');
 
-  try {
-    const resultado = await processarPipeline(texto);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-  } catch (err) {
-    console.error('Erro ao processar mensagem:', err);
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      'Erro ao processar mensagem no pipeline.'
-    );
-  }
+  (async () => {
+    try {
+      const resultado = await processarPipeline(texto);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+    } catch (err) {
+      console.error('Erro ao processar mensagem:', err);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao processar mensagem.');
+    }
+  })();
 });
 
 bot.on('message:document', async (ctx) => {
   const statusMsg = await ctx.reply('JARVIS: Lendo e analisando documento...');
 
-  try {
-    const file = await ctx.getFile();
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    const response = await fetch(fileUrl);
-    const textContent = await response.text();
+  (async () => {
+    try {
+      const file = await ctx.getFile();
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+      const response = await fetch(fileUrl);
+      const textContent = await response.text();
 
-    const resultado = await processarPipeline(textContent);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-  } catch (err) {
-    console.error('Erro ao processar documento:', err);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao ler o arquivo enviado.');
-  }
+      const resultado = await processarPipeline(textContent);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+    } catch (err) {
+      console.error('Erro ao processar documento:', err);
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao ler o arquivo enviado.');
+    }
+  })();
 });
 
 const webhookPath = '/telegram-webhook';
