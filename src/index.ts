@@ -1,6 +1,12 @@
 import { Bot, InlineKeyboard, webhookCallback } from "grammy";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 
+// Compatibilidade de importação do pdf-parse com ES Modules
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse");
+
+// Variáveis de ambiente
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ADMIN_ID = process.env.ADMIN_ID || "8133082447";
@@ -16,7 +22,7 @@ const bot = new Bot(BOT_TOKEN);
 const MODEL_TEXTO = "openrouter/free";
 const MODEL_VISAO = "google/gemma-4-26b-a4b-it:free";
 
-// ===== MEMÓRIA NO SUPABASE (UPSERT garantido) =====
+// ===== MEMÓRIA NO SUPABASE =====
 async function lerMemoria(chave) {
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
@@ -92,7 +98,7 @@ async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
   const pedido = legenda || "Analise este arquivo e me dê um resumo claro e direto do conteúdo.";
   const tamanho = (buffer.length / 1024).toFixed(0);
 
-  // IMAGEM → manda para o modelo de visão
+  // 1. IMAGEM → manda para o modelo de visão
   if (mimeType.startsWith("image/")) {
     const base64 = buffer.toString("base64");
     const dataUrl = `data:${mimeType};base64,${base64}`;
@@ -102,7 +108,28 @@ async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
     return `🖼️ **${nome}** (${tamanho} KB)\n\n${resposta}`;
   }
 
-  // TEXTO PURO (TXT, MD, JSON, CSV...)
+  // 2. PDF → leitor nativo com pdf-parse
+  if (mimeType === "application/pdf" || nome.toLowerCase().endsWith(".pdf")) {
+    try {
+      const data = await pdfParse(buffer);
+      const conteudo = data.text.trim().slice(0, 8000);
+
+      if (!conteudo) {
+        return `📄 **${nome}** (${tamanho} KB)\n\n⚠️ O PDF está vazio ou contém apenas imagens/páginas digitalizadas.`;
+      }
+
+      const resposta = await perguntarIA([
+        { role: "system", content: "Você é o Jarvis. Analise o conteúdo extraído do PDF e responda em português, direto ao ponto." },
+        { role: "user", content: `${pedido}\n\nConteúdo do PDF (${nome}):\n${conteudo}` },
+      ]);
+      return `📄 **${nome}** (${tamanho} KB)\n\n${resposta}`;
+    } catch (err) {
+      console.error("Erro ao ler PDF:", err);
+      return `⚠️ Não consegui extrair o texto deste PDF.`;
+    }
+  }
+
+  // 3. TEXTO PURO (TXT, MD, JSON, CSV...)
   const ehTexto = mimeType.startsWith("text/") || [".txt", ".md", ".json", ".csv", ".log"].some(e => nome.endsWith(e));
   if (ehTexto) {
     const conteudo = buffer.toString("utf-8").slice(0, 8000);
@@ -113,7 +140,7 @@ async function analisarArquivo(ctx, nome, buffer, mimeType, legenda) {
     return `📄 **${nome}** (${tamanho} KB)\n\n${resposta}`;
   }
 
-  // OUTROS FORMATOS (extração simples de caracteres imprimíveis)
+  // 4. OUTROS FORMATOS
   const conteudo = buffer.toString("utf-8").replace(/[^\x20-\x7E\u00C0-\u00FF\n\r]/g, " ").slice(0, 8000);
   const resposta = await perguntarIA([
     { role: "system", content: "Você é o Jarvis. Analise o conteúdo extraído do arquivo e responda em português, direto ao ponto." },
@@ -171,7 +198,7 @@ bot.callbackQuery("sobre", async (ctx) => {
   await ctx.reply("ℹ️ Sou o Jarvis, mais avançado e obediente que o JARVIS do Homem de Ferro. Analiso arquivos e rodo 24h no Render! 🚀");
 });
 
-// ===== ARQUIVO ENVIADO (documento) =====
+// ===== ARQUIVO ENVIADO =====
 bot.on("message:document", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const doc = ctx.message.document;
@@ -187,7 +214,7 @@ bot.on("message:document", async (ctx) => {
   }
 });
 
-// ===== IMAGEM ENVIADA (foto) =====
+// ===== IMAGEM ENVIADA =====
 bot.on("message:photo", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const foto = ctx.message.photo[ctx.message.photo.length - 1];
@@ -231,7 +258,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ===== WEBHOOK (Servidor HTTP) =====
+// ===== WEBHOOK (Servidor HTTP para Render) =====
 const webhookPath = `/bot${BOT_TOKEN}`;
 
 createServer(async (req, res) => {
