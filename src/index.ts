@@ -15,7 +15,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { console.error("Supabase não configur
 const bot = new Bot(BOT_TOKEN);
 const MODEL = "openrouter/free";
 
-// ===== MEMÓRIA NO SUPABASE =====
+// ===== MEMÓRIA NO SUPABASE (nunca some) =====
 async function lerMemoria(chave) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/memoria?chave=eq.${chave}&select=valor`, {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
@@ -129,7 +129,7 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ===== WEBHOOK (sem conflito 409) =====
+// ===== WEBHOOK (elimina o erro 409) =====
 const webhookPath = `/bot${BOT_TOKEN}`;
 
 createServer(async (req, res) => {
