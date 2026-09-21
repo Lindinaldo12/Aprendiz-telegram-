@@ -9,7 +9,6 @@ const openai = new OpenAI({
   },
 });
 
-// openrouter/free escolhe sozinho o melhor modelo gratuito disponível.
 const MODELS = [
   'openrouter/free',
   'meta-llama/llama-3.3-70b-instruct:free',
