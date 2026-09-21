@@ -1,3 +1,19 @@
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const supabase = (SUPABASE_URL && SUPABASE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
+
+const localAgents = new Map();
+
+export async function initAgents() {
+  if (!supabase) return;
+  const { error } = await supabase.rpc('create_sub_agents_table');
+  if (error) console.error('[initAgents]', error.message);
+}
+
 export async function createAgent(name, systemPrompt) {
   const cleanName = name.trim().toLowerCase();
   const agent = {
@@ -13,8 +29,7 @@ export async function createAgent(name, systemPrompt) {
       .select()
       .single();
     if (error) {
-      // Se a tabela não existe, cai na memória local em vez de falhar
-      console.warn('[createAgent] Supabase falhou, usando memória local:', error.message);
+      console.warn('[createAgent] Supabase falhou, usando memoria local:', error.message);
       localAgents.set(cleanName, agent);
       return agent;
     }
@@ -23,4 +38,43 @@ export async function createAgent(name, systemPrompt) {
 
   localAgents.set(cleanName, agent);
   return agent;
+}
+
+export async function listAgents() {
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('sub_agents')
+      .select('*')
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(error.message);
+    return data || [];
+  }
+  return [...localAgents.values()];
+}
+
+export async function getAgent(name) {
+  const cleanName = name.trim().toLowerCase();
+  if (supabase) {
+    const { data, error } = await supabase
+      .from('sub_agents')
+      .select('*')
+      .eq('name', cleanName)
+      .single();
+    if (error) return null;
+    return data;
+  }
+  return localAgents.get(cleanName) || null;
+}
+
+export async function deleteAgent(name) {
+  const cleanName = name.trim().toLowerCase();
+  if (supabase) {
+    const { error } = await supabase
+      .from('sub_agents')
+      .delete()
+      .eq('name', cleanName);
+    if (error) throw new Error(error.message);
+    return true;
+  }
+  return localAgents.delete(cleanName);
 }
