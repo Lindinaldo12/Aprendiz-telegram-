@@ -20,37 +20,32 @@ type ChatMessage = {
   content: string;
 };
 
-// Guarda a memória do histórico de cada conversa no Telegram
 const conversationHistory = new Map<number, ChatMessage[]>();
 
 export async function askOpenRouter(chatId: number, prompt: string): Promise<string> {
   try {
     let history = conversationHistory.get(chatId);
 
-    // Se a conversa for nova, inicia com a instrução do Jarvis
     if (!history) {
       history = [{ role: 'system', content: SYSTEM_INSTRUCTION }];
     }
 
-    // Adiciona a nova mensagem do usuário
     history.push({ role: 'user', content: prompt });
 
-    // Mantém no máximo 20 mensagens anteriores para otimizar velocidade
     if (history.length > 21) {
       const systemMsg = history[0];
       const recentMessages = history.slice(history.length - 20);
       history = [systemMsg, ...recentMessages];
     }
 
-    // Chama o modelo Hermes grátis via OpenRouter
+    // Modelo com o ID corrigido (3-8b com hífen)
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENROUTER_MODEL || 'nousresearch/hermes-3-llama-3.8b:free',
+      model: process.env.OPENROUTER_MODEL || 'nousresearch/hermes-3-llama-3-8b:free',
       messages: history,
     });
 
     const replyText = completion.choices[0]?.message?.content || 'Senhor, não obtive resposta da rede.';
 
-    // Salva a resposta no histórico da conversa
     history.push({ role: 'assistant', content: replyText });
     conversationHistory.set(chatId, history);
 
