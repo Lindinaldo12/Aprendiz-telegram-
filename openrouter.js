@@ -9,9 +9,7 @@ const openai = new OpenAI({
   },
 });
 
-// Modelos gratuitos que existem hoje no OpenRouter.
-// O primeiro (openrouter/free) é o mais importante: ele escolhe
-// sozinho o melhor modelo gratuito disponível no momento.
+// openrouter/free escolhe sozinho o melhor modelo gratuito disponível.
 const MODELS = [
   'openrouter/free',
   'meta-llama/llama-3.3-70b-instruct:free',
