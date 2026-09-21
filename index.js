@@ -3,9 +3,6 @@ import { createServer } from 'node:http';
 import { askOpenRouter, getModelRanking } from './openrouter.js';
 import { initAgents, createAgent, listAgents, getAgent, deleteAgent } from './agents.js';
 
-// ==========================================
-// 1. VARIÁVEIS DE AMBIENTE
-// ==========================================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
@@ -17,9 +14,6 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
 
-// ==========================================
-// 2. PROMPTS DO ORQUESTRADOR (JARVIS)
-// ==========================================
 const JARVIS_SYSTEM_PROMPT = `
 Voce e o JARVIS, um assistente executivo e orquestrador inteligente.
 Sua funcao e receber o texto do usuario e os relatorios dos sub-agentes disponiveis.
@@ -50,9 +44,6 @@ Verifique:
 Se tudo estiver correto, informe "Nenhuma inconformidade detectada". Caso contrario, liste os alertas de risco.
 `;
 
-// ==========================================
-// 3. PIPELINE MULTI-AGENTE
-// ==========================================
 async function processarPipeline(textoUsuario) {
   const agents = await listAgents();
   const agentList = agents.length
@@ -103,9 +94,6 @@ async function executarAgente(nomeAgente, texto) {
   ], { temperature: 0.4 });
 }
 
-// ==========================================
-// 4. COMANDOS DO BOT
-// ==========================================
 bot.command('start', async (ctx) => {
   await ctx.reply(
     'JARVIS 2.0 Online\n\n' +
@@ -207,9 +195,6 @@ bot.command('deletar_agente', async (ctx) => {
     : `Sub-agente "${nome}" nao encontrado.`);
 });
 
-// ==========================================
-// 5. MENSAGENS DE TEXTO
-// ==========================================
 bot.on('message:text', async (ctx) => {
   const texto = ctx.message.text;
   if (texto.startsWith('/')) return;
@@ -246,9 +231,6 @@ bot.on('message:document', async (ctx) => {
   }
 });
 
-// ==========================================
-// 6. SERVIDOR HTTP & WEBHOOK
-// ==========================================
 const webhookPath = '/telegram-webhook';
 
 const server = createServer(async (req, res) => {
