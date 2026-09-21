@@ -9,21 +9,20 @@ const openai = new OpenAI({
   },
 });
 
-// Modelos em ordem de preferência. O bot mede o tempo de cada um
-// e reordena automaticamente para sempre usar o mais rápido.
+// Modelos gratuitos que existem hoje no OpenRouter.
+// O primeiro (openrouter/free) é o mais importante: ele escolhe
+// sozinho o melhor modelo gratuito disponível no momento.
 const MODELS = [
-  process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free',
+  'openrouter/free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'meta-llama/llama-3.1-8b-instruct:free',
+  'openai/gpt-oss-120b:free',
 ];
 
-// Guarda a latência média de cada modelo (ms)
 const latencyStats = new Map();
 
 export async function askOpenRouter(messages, options = {}) {
   const { temperature = 0.7, maxTokens = 2000 } = options;
 
-  // Ordena modelos: os que responderam mais rápido ficam na frente
   const sortedModels = [...MODELS].sort((a, b) => {
     const la = latencyStats.get(a) ?? 99999;
     const lb = latencyStats.get(b) ?? 99999;
@@ -45,7 +44,6 @@ export async function askOpenRouter(messages, options = {}) {
       const reply = completion.choices?.[0]?.message?.content || '';
       if (!reply) continue;
 
-      // Atualiza a latência média (média móvel)
       const elapsed = Date.now() - start;
       const current = latencyStats.get(model) ?? elapsed;
       latencyStats.set(model, Math.round((current + elapsed) / 2));
@@ -54,7 +52,6 @@ export async function askOpenRouter(messages, options = {}) {
     } catch (error) {
       lastError = error;
       console.warn(`Modelo ${model} falhou: ${error?.message || error}`);
-      // 429 = limite de requisições, tenta o próximo modelo
       if (error?.status === 429) continue;
     }
   }
