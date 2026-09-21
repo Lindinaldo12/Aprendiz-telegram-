@@ -8,6 +8,16 @@ const PORT = process.env.PORT || 10000;
 const botToken = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '';
 const bot = new Bot(botToken);
 
+// Comando de boas-vindas
+bot.command('start', async (ctx) => {
+  await ctx.reply('Bem-vindo, Senhor. Sou o Jarvis. Estou à sua disposição.');
+});
+
+// Comando de ajuda
+bot.command('help', async (ctx) => {
+  await ctx.reply('Comandos disponíveis:\n/reset - Limpa a memória da conversa\n/help - Mostra esta ajuda');
+});
+
 // Comando para limpar a memória da conversa
 bot.command('reset', async (ctx) => {
   clearMemory(ctx.chat.id);
@@ -37,7 +47,6 @@ app.listen(PORT, () => {
 // Inicialização segura do Bot do Telegram
 async function startBot() {
   try {
-    // Apaga webhooks e pendências antigas para evitar o erro de conflito (409)
     await bot.api.deleteWebhook({ drop_pending_updates: true });
 
     bot.start({
