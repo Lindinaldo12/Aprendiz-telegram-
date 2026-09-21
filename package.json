@@ -1,11 +1,14 @@
 {
   "name": "jarvis-telegram-bot",
   "version": "1.0.0",
-  "description": "Bot Telegram com IA e integração Supabase",
+  "description": "Bot do Telegram com IA e sub-agentes no Render",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "grammy": "^1.30.0",
