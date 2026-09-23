@@ -1,47 +1,182 @@
-import { Bot, webhookCallback } from 'grammy';
+import { Bot } from 'grammy';
 import { createServer } from 'node:http';
-import { askOpenRouter, getModelRanking } from './openrouter.js';
-import { initAgents, createAgent, listAgents, getAgent, deleteAgent } from './agents.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+function loadDotEnv() {
+  const envFile = path.resolve(process.cwd(), '.env');
+
+  if (!fs.existsSync(envFile)) {
+    return;
+  }
+
+  const content = fs.readFileSync(envFile, 'utf8');
+  const lines = content.split(/\r?\n/);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const index = trimmed.indexOf('=');
+    if (index === -1) continue;
+
+    const key = trimmed.slice(0, index).trim();
+    const value = trimmed.slice(index + 1).trim();
+
+    if (!process.env[key]) {
+      process.env[key] = value.replace(/^['"]|['"]$/g, '');
+    }
+  }
+}
+
+loadDotEnv();
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const PORT = Number(process.env.PORT || 3000);
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
-const PORT = process.env.PORT || 3000;
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('ERRO CRITICO: TELEGRAM_BOT_TOKEN nao foi configurado!');
   process.exit(1);
 }
 
+if (!OPENROUTER_API_KEY) {
+  console.warn('AVISO: OPENROUTER_API_KEY nao foi configurado. O bot pode falhar ao responder.');
+}
+
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
 
-const JARVIS_SYSTEM_PROMPT = `
-Voce e o JARVIS, um assistente executivo e orquestrador inteligente.
-Sua funcao e receber o texto do usuario e os relatorios dos sub-agentes disponiveis.
+const MODEL_LIST = [
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'google/gemini-2.0-flash-exp:free',
+  'meta-llama/llama-3.1-8b-instruct:free',
+  'openai/gpt-oss-120b:free',
+];
 
-Sub-agentes disponiveis:
+const latencyStats = new Map();
+const localAgents = new Map();
+
+async function askOpenRouter(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 2000 } = options;
+
+  const sortedModels = [...MODEL_LIST].sort((a, b) => {
+    const la = latencyStats.get(a) ?? 99999;
+    const lb = latencyStats.get(b) ?? 99999;
+    return la - lb;
+  });
+
+  let lastError = null;
+
+  for (const model of sortedModels) {
+    const start = Date.now();
+
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': RENDER_EXTERNAL_URL || 'https://localhost',
+          'X-Title': 'Jarvis Telegram Bot',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+        }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`OpenRouter ${response.status}: ${text}`);
+      }
+
+      const data = await response.json();
+      const reply = data?.choices?.[0]?.message?.content || '';
+
+      if (!reply) continue;
+
+      const elapsed = Date.now() - start;
+      const current = latencyStats.get(model) ?? elapsed;
+      latencyStats.set(model, Math.round((current + elapsed) / 2));
+
+      return reply;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Modelo ${model} falhou: ${error?.message || error}`);
+    }
+  }
+
+  throw new Error(lastError?.message || 'Todos os modelos falharam');
+}
+
+function getModelRanking() {
+  return [...MODEL_LIST]
+    .map((m) => ({
+      model: m,
+      latency: latencyStats.get(m) ?? null,
+    }))
+    .sort((a, b) => (a.latency ?? 99999) - (b.latency ?? 99999));
+}
+
+async function createAgent(name, systemPrompt) {
+  const cleanName = String(name || '').trim().toLowerCase();
+  if (!cleanName) throw new Error('Nome do agente obrigatório');
+
+  const agent = {
+    name: cleanName,
+    system_prompt: systemPrompt,
+    created_at: new Date().toISOString(),
+  };
+
+  localAgents.set(cleanName, agent);
+  return agent;
+}
+
+async function listAgents() {
+  return [...localAgents.values()];
+}
+
+async function getAgent(name) {
+  const cleanName = String(name || '').trim().toLowerCase();
+  return localAgents.get(cleanName) || null;
+}
+
+async function deleteAgent(name) {
+  const cleanName = String(name || '').trim().toLowerCase();
+  return localAgents.delete(cleanName);
+}
+
+const JARVIS_SYSTEM_PROMPT = `
+Você é o JARVIS, um assistente executivo e orquestrador inteligente.
+Sua função é receber o texto do usuário e os relatórios dos sub-agentes disponíveis.
+
+Sub-agentes disponíveis:
 {{AGENTS}}
 
 Sua tarefa:
-- Consolidar as informacoes em uma resposta final clara, profissional e objetiva em portugues.
-- Destacar alertas criticos e inconsistencias.
-- Fornecer um resumo executivo e acoes sugeridas.
-- Se o usuario pedir algo que um sub-agente especifico faz melhor, delegue a ele aquele trecho.
+- Consolidar as informações em uma resposta final clara, profissional e objetiva em português.
+- Destacar alertas críticos e inconsistências.
+- Fornecer um resumo executivo e ações sugeridas.
+- Se o usuário pedir algo que um sub-agente específico faz melhor, delegue a ele aquele trecho.
 `;
 
 const PROMPT_EXTRATOR = `
-Voce e o Sub-Agente Extrator.
-Sua missao e extrair estritamente todos os fatos, valores financeiros, datas, nomes e dados do texto.
-Nao emita opinioes ou avaliacoes. Apenas liste os dados de forma limpa e estruturada.
+Você é o Sub-Agente Extrator.
+Sua missão é extrair estritamente todos os fatos, valores financeiros, datas, nomes e dados do texto.
+Não emita opiniões ou avaliações. Apenas liste os dados de forma limpa e estruturada.
 `;
 
 const PROMPT_AUDITOR = `
-Voce e o Sub-Agente Auditor.
-Sua missao e analisar o texto e a extracao efetuada.
+Você é o Sub-Agente Auditor.
+Sua missão é analisar o texto e a extração efetuada.
 Verifique:
-1. Erros de calculo ou discrepancias financeiras (ex: Receita vs Custos vs Lucro).
+1. Erros de cálculo ou discrepâncias financeiras (ex: Receita vs Custos vs Lucro).
 2. Riscos operacionais, contratuais ou fiscais.
 3. Prazos inconsistentes ou alertas.
-Se tudo estiver correto, informe "Nenhuma inconformidade detectada". Caso contrario, liste os alertas de risco.
+Se tudo estiver correto, informe "Nenhuma inconformidade detectada". Caso contrário, liste os alertas de risco.
 `;
 
 async function processarPipeline(textoUsuario) {
@@ -61,20 +196,20 @@ async function processarPipeline(textoUsuario) {
   console.log('Executando Sub-Agente Auditor...');
   const relatorioAuditoria = await askOpenRouter([
     { role: 'system', content: PROMPT_AUDITOR },
-    { role: 'user', content: `Texto Original:\n${textoUsuario}\n\nExtracao:\n${dadosExtraidos}` },
+    { role: 'user', content: `Texto Original:\n${textoUsuario}\n\nExtração:\n${dadosExtraidos}` },
   ], { temperature: 0.2 });
 
   console.log('Executando JARVIS Consolidador...');
   const contextoConsolidacao = `
-TEXTO ENVIADO PELO USUARIO:
+TEXTO ENVIADO PELO USUÁRIO:
 ${textoUsuario}
 
 ---
-RELATORIO DO SUB-AGENTE EXTRATOR:
+RELATÓRIO DO SUB-AGENTE EXTRATOR:
 ${dadosExtraidos}
 
 ---
-RELATORIO DO SUB-AGENTE AUDITOR:
+RELATÓRIO DO SUB-AGENTE AUDITOR:
 ${relatorioAuditoria}
 `;
 
@@ -85,7 +220,7 @@ ${relatorioAuditoria}
 }
 
 async function executarAgente(nomeAgente, texto) {
-  const agent = await getAgent(nomeAgente.trim().toLowerCase());
+  const agent = await getAgent(String(nomeAgente || '').trim().toLowerCase());
   if (!agent) return `Sub-agente "${nomeAgente}" nao encontrado. Use /agentes para ver a lista.`;
 
   return await askOpenRouter([
@@ -142,32 +277,30 @@ bot.command('criar_agente', async (ctx) => {
 
   const statusMsg = await ctx.reply(`Criando sub-agente ${nome}...`);
 
-  // Responde na hora e processa em segundo plano (evita timeout)
-  (async () => {
-    try {
-      const systemPrompt = await askOpenRouter([
-        {
-          role: 'system',
-          content: `Voce e um especialista em criar sub-agentes de IA. Gere um system prompt profissional e objetivo em portugues para um sub-agente chamado "${nome}" cuja funcao e: ${descricao}. Responda APENAS com o system prompt, sem explicacoes.`,
-        },
-        { role: 'user', content: `Crie o system prompt para o sub-agente ${nome}.` },
-      ], { temperature: 0.4 });
+  try {
+    const systemPrompt = await askOpenRouter([
+      {
+        role: 'system',
+        content: `Voce e um especialista em criar sub-agentes de IA. Gere um system prompt profissional e objetivo em portugues para um sub-agente chamado "${nome}" cuja funcao e: ${descricao}.`,
+      },
+      { role: 'user', content: `Crie o system prompt para o sub-agente ${nome}.` },
+    ], { temperature: 0.4 });
 
-      await createAgent(nome, systemPrompt);
-      await ctx.api.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        `Sub-agente ${nome} criado com sucesso!\n\nPrompt gerado:\n${systemPrompt}\n\nUse: /executar ${nome} | sua mensagem`
-      );
-    } catch (err) {
-      console.error('Erro ao criar agente:', err);
-      await ctx.api.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        `Erro ao criar o sub-agente.\n\nDetalhe: ${err?.message || err}\n\nDica: se for "rate limit" ou "429", adicione creditos no OpenRouter ou tente de novo em alguns minutos.`
-      );
-    }
-  })();
+    await createAgent(nome, systemPrompt);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Sub-agente ${nome} criado com sucesso!\n\nPrompt gerado:\n${systemPrompt}\n\nUse: /executar ${nome} | sua mensagem`
+    );
+  } catch (err) {
+    console.error('Erro ao criar agente:', err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Erro ao criar o sub-agente.\n\nDetalhe: ${err?.message || err}\n\nDica: se for "rate limit" ou "429", adicione créditos no OpenRouter ou tente de novo em alguns minutos.`
+    );
+  }
 });
 
 bot.command('executar', async (ctx) => {
@@ -179,15 +312,13 @@ bot.command('executar', async (ctx) => {
   const [nome, mensagem] = args.split('|').map((s) => s.trim());
   const statusMsg = await ctx.reply(`Executando sub-agente ${nome}...`);
 
-  (async () => {
-    try {
-      const resultado = await executarAgente(nome, mensagem);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-    } catch (err) {
-      console.error('Erro ao executar agente:', err);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao executar o sub-agente.');
-    }
-  })();
+  try {
+    const resultado = await executarAgente(nome, mensagem);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+  } catch (err) {
+    console.error('Erro ao executar agente:', err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao executar o sub-agente.');
+  }
 });
 
 bot.command('deletar_agente', async (ctx) => {
@@ -195,65 +326,49 @@ bot.command('deletar_agente', async (ctx) => {
   if (!nome) return ctx.reply('Formato: /deletar_agente Nome');
 
   const deleted = await deleteAgent(nome);
-  await ctx.reply(deleted
-    ? `Sub-agente ${nome} deletado.`
-    : `Sub-agente "${nome}" nao encontrado.`);
+  await ctx.reply(
+    deleted
+      ? `Sub-agente ${nome} deletado.`
+      : `Sub-agente "${nome}" nao encontrado.`
+  );
 });
 
 bot.on('message:text', async (ctx) => {
   const texto = ctx.message.text;
   if (texto.startsWith('/')) return;
 
-  // Responde na hora, sem esperar a IA (evita timeout de 10s)
   const statusMsg = await ctx.reply('JARVIS: Processando...');
 
-  (async () => {
-    try {
-      const resultado = await processarPipeline(texto);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-    } catch (err) {
-      console.error('Erro ao processar mensagem:', err);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao processar mensagem.');
-    }
-  })();
+  try {
+    const resultado = await processarPipeline(texto);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+  } catch (err) {
+    console.error('Erro ao processar mensagem:', err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao processar mensagem.');
+  }
 });
 
 bot.on('message:document', async (ctx) => {
   const statusMsg = await ctx.reply('JARVIS: Lendo e analisando documento...');
 
-  (async () => {
-    try {
-      const file = await ctx.getFile();
-      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-      const response = await fetch(fileUrl);
-      const textContent = await response.text();
+  try {
+    const file = await ctx.getFile();
+    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const response = await fetch(fileUrl);
+    const textContent = await response.text();
 
-      const resultado = await processarPipeline(textContent);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
-    } catch (err) {
-      console.error('Erro ao processar documento:', err);
-      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao ler o arquivo enviado.');
-    }
-  })();
+    const resultado = await processarPipeline(textContent);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, resultado);
+  } catch (err) {
+    console.error('Erro ao processar documento:', err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, 'Erro ao ler o arquivo enviado.');
+  }
 });
 
-const webhookPath = '/telegram-webhook';
-
-const server = createServer(async (req, res) => {
+const server = createServer((req, res) => {
   if (req.url === '/' || req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('OK - JARVIS 2.0 em execucao.');
-    return;
-  }
-
-  if (req.url === webhookPath && req.method === 'POST') {
-    try {
-      await webhookCallback(bot, 'http')(req, res);
-    } catch (err) {
-      console.error('Erro no webhook:', err);
-      res.writeHead(500);
-      res.end('Erro Interno');
-    }
     return;
   }
 
@@ -263,15 +378,30 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, async () => {
   console.log(`Servidor HTTP rodando na porta ${PORT}`);
-  await initAgents();
 
   if (RENDER_EXTERNAL_URL) {
+    const webhookPath = '/telegram-webhook';
     const fullWebhookUrl = `${RENDER_EXTERNAL_URL}${webhookPath}`;
+
     try {
       await bot.api.setWebhook(fullWebhookUrl);
       console.log(`Webhook configurado: ${fullWebhookUrl}`);
     } catch (err) {
       console.error('Falha ao registrar Webhook:', err.message);
+    }
+  } else {
+    try {
+      await bot.api.deleteWebhook({ drop_pending_updates: true });
+      console.log('Webhook removido. Iniciando modo polling...');
+
+      bot.start({
+        drop_pending_updates: true,
+        onStart: (botInfo) => {
+          console.log(`Bot @${botInfo.username} iniciado com polling.`);
+        },
+      });
+    } catch (err) {
+      console.error('Erro ao iniciar polling:', err);
     }
   }
 });
